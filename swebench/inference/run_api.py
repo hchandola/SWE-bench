@@ -4,6 +4,8 @@
 It sorts instances by length and continually writes the outputs to a specified file, so that the script can be stopped and restarted without losing progress.
 """
 
+from azure.identity import AzureCliCredential
+import datetime
 import json
 import os
 import time
@@ -29,6 +31,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 dotenv.load_dotenv()
 
+openai.api_version = "2025-01-01-preview"
+openai.api_type = "azure"
 MODEL_LIMITS = {
     "claude-instant-1": 100_000,
     "claude-2": 100_000,
@@ -42,6 +46,8 @@ MODEL_LIMITS = {
     "gpt-4-0613": 8_192,
     "gpt-4-1106-preview": 128_000,
     "gpt-4-0125-preview": 128_000,
+    "gpt-4o": 128_000,
+    "gpt-4o-2024-11-20": 128_000
 }
 
 # The cost per token for each model input.
@@ -61,6 +67,7 @@ MODEL_COST_PER_INPUT = {
     "gpt-4-32k": 0.00006,
     "gpt-4-1106-preview": 0.00001,
     "gpt-4-0125-preview": 0.00001,
+    "gpt-4o": 0.00001, "gpt-4o-2024-11-20": 0.00001
 }
 
 # The cost per token for each model output.
@@ -80,6 +87,7 @@ MODEL_COST_PER_OUTPUT = {
     "gpt-4-32k": 0.00012,
     "gpt-4-1106-preview": 0.00003,
     "gpt-4-0125-preview": 0.00003,
+    "gpt-4o": 0.00003, "gpt-4o-2024-11-20": 0.00003
 }
 
 # used for azure
@@ -109,7 +117,19 @@ def calc_cost(model_name, input_tokens, output_tokens):
     )
     return cost
 
+class TokenManager:
+    def __init__(self):
+        self.credential = AzureCliCredential()
+        self._current_tokens = {}
 
+    def get_token(self, resource: str = "https://cognitiveservices.azure.com") -> str:
+        token = self._current_tokens.get(resource)
+        if token is None or token.expires_on < datetime.datetime.now().timestamp() + 60:
+            token = self.credential.get_token(resource)
+            self._current_tokens[resource] = token
+        return token.token
+
+token_manager = TokenManager()
 @retry(wait=wait_random_exponential(min=30, max=600), stop=stop_after_attempt(3))
 def call_chat(model_name_or_path, inputs, use_azure, temperature, top_p, **model_args):
     """
@@ -196,13 +216,6 @@ def openai_inference(
         desc="Filtering",
         load_from_cache_file=False,
     )
-    openai_key = os.environ.get("OPENAI_API_KEY", None)
-    if openai_key is None:
-        raise ValueError(
-            "Must provide an api key. Expected in OPENAI_API_KEY environment variable."
-        )
-    openai.api_key = openai_key
-    print(f"Using OpenAI key {'*' * max(0, len(openai_key) - 5) + openai_key[-5:]}")
     use_azure = model_args.pop("use_azure", False)
     if use_azure:
         openai.api_type = "azure"
@@ -224,6 +237,7 @@ def openai_inference(
             output_dict = {"instance_id": instance_id}
             output_dict.update(basic_args)
             output_dict["text"] = f"{datum['text']}\n\n"
+            openai.api_key = token_manager.get_token()
             response, cost = call_chat(
                 output_dict["model_name_or_path"],
                 output_dict["text"],
